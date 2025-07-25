@@ -2,26 +2,60 @@ package com.github.tommyt0mmy.firefighter.commands;
 
 import com.github.tommyt0mmy.firefighter.FireFighter;
 import com.github.tommyt0mmy.firefighter.utility.Permissions;
+import com.github.tommyt0mmy.firefighter.utility.TitleActionBarUtil;
 import com.github.tommyt0mmy.firefighter.utility.XMaterial;
+import com.sk89q.worldedit.bukkit.BukkitAdapter;
+import com.sk89q.worldedit.math.BlockVector3;
+import com.sk89q.worldguard.WorldGuard;
+import com.sk89q.worldguard.bukkit.WorldGuardPlugin;
+import com.sk89q.worldguard.protection.ApplicableRegionSet;
+import com.sk89q.worldguard.protection.regions.ProtectedRegion;
+import com.sk89q.worldguard.protection.regions.RegionQuery;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
+import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.boss.BarColor;
+import org.bukkit.boss.BarStyle;
+import org.bukkit.boss.BossBar;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.MemorySection;
+import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.scheduler.BukkitRunnable;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Fireset implements CommandExecutor
 {
 
     private FireFighter FireFighterClass = FireFighter.getInstance();
+    private final Map<String, Integer> initialCount = new ConcurrentHashMap<>();
+    private final Map<String, Set<Block>> currentFires = new ConcurrentHashMap<>();
+    private Map<String, Set<BlockVector3>> firePositions = new ConcurrentHashMap<>();
+    private Map<String, BossBar> bossBars = new ConcurrentHashMap<>();
+    private BukkitRunnable missionTask;
+    private String activeMissionId = null;
+
+    public ProtectedRegion getPlayerRegion(Player player) {
+        com.sk89q.worldedit.entity.Player wrappedPlayer = WorldGuardPlugin.inst().wrapPlayer(player);
+        RegionQuery query = WorldGuard.getInstance().getPlatform().getRegionContainer().createQuery();
+        ApplicableRegionSet applicableRegionSet = query.getApplicableRegions(wrappedPlayer.getLocation());
+        Iterator iterator = applicableRegionSet.iterator();
+        if (iterator.hasNext()) {
+            ProtectedRegion region = (ProtectedRegion) iterator.next();
+            return region;
+        }
+        return null;
+    }
 
     private String getUsage()
     { //TODO Change method
@@ -31,16 +65,11 @@ public class Fireset implements CommandExecutor
     @Override
     public boolean onCommand(CommandSender Sender, Command cmd, String label, String[] args)
     {
-        if (!(Sender instanceof Player))
-        {
-            Sender.sendMessage(FireFighterClass.messages.formattedMessage("", "only_players_command"));
-            return true;
-        }
 
-        Player p = (Player) Sender;
-        if (!(p.hasPermission(Permissions.FIRESET.getNode()) || p.isOp()))
+
+        if (!(Sender.hasPermission(Permissions.FIRESET.getNode()) || Sender.isOp()))
         {
-            p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
+            Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
             return true;
         }
 
@@ -50,6 +79,8 @@ public class Fireset implements CommandExecutor
 
         if (args.length == 0)
         { //giving the wand
+            if(!(Sender instanceof Player)) return true;
+            Player p = (Player) Sender;
             p.getInventory().addItem(wand);
             p.sendMessage(FireFighterClass.messages.formattedMessage("§e", "fireset_wand_instructions"));
         } else
@@ -60,37 +91,148 @@ public class Fireset implements CommandExecutor
 
 
                 case "startmission":
-                    //perm check
-                    if (!p.hasPermission(Permissions.START_MISSION.getNode()))
+                    if (!Sender.hasPermission(Permissions.START_MISSION.getNode()))
                     {
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
                     }
                     //arguments check
                     if (args.length != 2)
                     {
-                        p.sendMessage(getUsage());
+                        Sender.sendMessage(getUsage());
                         return true;
                     }
-                    if (existsMission(args[1]))
-                    {
-                        if (FireFighterClass.startedMission)
-                        {
-                            p.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.formattedMessage("§c", "fireset_another_mission_started")));
-                            return true;
-                        }
-                        FireFighterClass.missionName = args[1];
-                        FireFighterClass.programmedStart = true;
-                        p.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.formattedMessage("§a", "fireset_started_mission")));
-                    } else
-                    {
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "fireset_mission_not_found"));
+                    String missionId = args[1];
+                    FileConfiguration cfg = FireFighter.getInstance().configs.getConfig();
+                    World world = Bukkit.getWorld("Napoli");
+                    ProtectedRegion region = WorldGuard.getInstance()
+                            .getPlatform().getRegionContainer()
+                            .get(BukkitAdapter.adapt(world))
+                            .getRegion(cfg.getString("missions." + missionId + ".region"));
+                    if (region == null) {
+                        Sender.sendMessage("§cWorld or region not found for mission " + missionId);
                         return true;
                     }
 
+                    // Cancel any existing task and bossbar
+                    if (missionTask != null) {
+                        missionTask.cancel();
+                    }
+                    BossBar oldBar = bossBars.remove(missionId);
+                    if (oldBar != null) {
+                        oldBar.removeAll();
+                    }
+
+                    // Create new BossBar
+                    BossBar bossBar = Bukkit.createBossBar(
+                            "§aStatus incendio",
+                            BarColor.GREEN,
+                            BarStyle.SOLID
+                    );
+                    bossBars.put(missionId, bossBar);
+                    activeMissionId = missionId;
+
+                    missionTask = new BukkitRunnable() {
+                        private boolean firstRun = true;
+
+                        @Override
+                        public void run() {
+                            if (firstRun) {
+                                Set<BlockVector3> positions = new HashSet<>();
+                                BlockVector3 min = region.getMinimumPoint();
+                                BlockVector3 max = region.getMaximumPoint();
+                                for (int x = min.getBlockX(); x <= max.getBlockX(); x++) {
+                                    for (int y = min.getBlockY(); y < max.getBlockY(); y++) {
+                                        for (int z = min.getBlockZ(); z <= max.getBlockZ(); z++) {
+                                            Block below = world.getBlockAt(x, y, z);
+                                            if (!below.getType().isSolid()) continue;
+                                            Block above = world.getBlockAt(x, y + 1, z);
+                                            if (above.getType() == Material.AIR) {
+                                                above.setType(Material.FIRE);
+                                                positions.add(BlockVector3.at(x, y + 1, z));
+                                            }
+                                        }
+                                    }
+                                }
+                                firePositions.put(missionId, positions);
+                                initialCount.put(missionId, positions.size());
+                                // Add players in region to bossbar
+                                for (Player p : world.getPlayers()) {
+                                    BlockVector3 loc = BlockVector3.at(
+                                            p.getLocation().getBlockX(),
+                                            p.getLocation().getBlockY(),
+                                            p.getLocation().getBlockZ()
+                                    );
+                                    if (region.contains(loc)) {
+                                        bossBar.addPlayer(p);
+                                    }
+                                }
+                                firstRun = false;
+                            }
+
+                            Set<BlockVector3> positions = firePositions.get(missionId);
+                            int initial = initialCount.getOrDefault(missionId, 0);
+                            int remaining = 0;
+                            for (BlockVector3 vec : positions) {
+                                if (world.getBlockAt(vec.getBlockX(), vec.getBlockY(), vec.getBlockZ()).getType() == Material.FIRE) {
+                                    remaining++;
+                                }
+                            }
+
+                            // Update bossbar progress
+                            double progress = initial > 0 ? (double) remaining / initial : 1.0;
+                            bossBar.setProgress(Math.max(0, Math.min(progress, 1)));
+
+
+                            List<Player> toRemove = new ArrayList<>();
+                            for (Player p : bossBar.getPlayers()) {
+                                BlockVector3 loc = BlockVector3.at(
+                                        p.getLocation().getBlockX(),
+                                        p.getLocation().getBlockY(),
+                                        p.getLocation().getBlockZ()
+                                );
+                                if (!region.contains(loc)) {
+                                    toRemove.add(p);
+                                }
+                            }
+                            for (Player p : toRemove) {
+                                bossBar.removePlayer(p);
+                            }
+                            // Add new entrants
+                            for (Player p : world.getPlayers()) {
+                                BlockVector3 loc = BlockVector3.at(
+                                        p.getLocation().getBlockX(),
+                                        p.getLocation().getBlockY(),
+                                        p.getLocation().getBlockZ()
+                                );
+                                if (region.contains(loc) && !bossBar.getPlayers().contains(p)) {
+                                    bossBar.addPlayer(p);
+                                }
+                            }
+
+                            // End mission when no fires remain
+                            if (remaining == 0) {
+                                cancel();
+                                bossBar.removeAll();
+                                firePositions.remove(missionId);
+                                initialCount.remove(missionId);
+                                bossBars.remove(missionId);
+                                giveRewards(missionId, world);
+                                Sender.sendMessage("§aMission " + missionId + " completed!");
+                            }
+                        }
+                    };
+                    // Schedule task every second
+                    missionTask.runTaskTimer(FireFighter.getInstance(), 0L, 20L);
+                    Sender.sendMessage("§aMission " + missionId + " started!");
                     break;
 
 
                 case "missions": ///MISSIONS LIST///
+                    if (!(Sender instanceof Player))
+                    {
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("", "only_players_command"));
+                        return true;
+                    }
                     //Page selection
                     int page = 1, count = 0;
                     if (args.length == 2)
@@ -100,73 +242,77 @@ public class Fireset implements CommandExecutor
                             page = Integer.parseInt(args[1]);
                         } else
                         {
-                            p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "page_not_found"));
+                            Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "page_not_found"));
                             return true;
                         }
                     } else if (args.length > 2)
                     {
-                        p.sendMessage(getUsage());
+                        Sender.sendMessage(getUsage());
                     }
                     //two missions per page
                     Set<String> missions = new TreeSet<>();
                     missions = FireFighterClass.configs.getConfig().getConfigurationSection("missions").getKeys(false);
                     if (missions.size() < (page * 2) - 1 || page * 2 <= 0)
                     {
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "page_not_found"));
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "page_not_found"));
                         return true;
                     }
-                    p.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_header")));
+                    Sender.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_header")));
                     for (String curr : missions)
                     {
                         count++;
                         if (count == (page * 2) - 1 || count == page * 2)
                         {
                             ConfigurationSection missionSection = FireFighterClass.configs.getConfig().getConfigurationSection("missions." + curr);
-                            String world_name = missionSection.getString("world");
-                            p.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_name").replaceAll("<mission>", curr)));
-                            p.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_world").replaceAll("<world>", world_name)));
-                            int x = (missionSection.getInt("first_position.x") + missionSection.getInt("second_position.x")) / 2;
-                            int y = missionSection.getInt("altitude");
-                            int z = (missionSection.getInt("first_position.z") + missionSection.getInt("second_position.z")) / 2;
-                            p.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_position")
-                                    .replaceAll("<x>", String.valueOf(x))
-                                    .replaceAll("<y>", String.valueOf(y))
-                                    .replaceAll("<z>", String.valueOf(z))));
+                            Player p = (Player) Sender;
+                            Sender.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_name").replaceAll("<mission>", curr)));
+                            Sender.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_position")
+                                    .replaceAll("<id>",WorldGuard.getInstance().getPlatform().getRegionContainer().get(BukkitAdapter.adapt(p.getWorld())).getRegion(missionSection.getString("region")).getId())));
                         }
                     }
-                    p.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_footer")
+                    Sender.sendMessage(ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("fireset_missions_footer")
                             .replaceAll("<current page>", String.valueOf(page))
                             .replaceAll("<total>", String.valueOf((missions.size() + 1) / 2))));
                     break;
 
 
                 case "deletemission": ///DELETE MISSION///
+                    if (!(Sender instanceof Player))
+                    {
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("", "only_players_command"));
+                        return true;
+                    }
                     if (args.length != 2)
                     {
-                        p.sendMessage(getUsage());
+                        Sender.sendMessage(getUsage());
                         break;
                     }
                     if (existsMission(args[1]))
                     {
                         FireFighterClass.configs.set("missions." + args[1], null); //removes the path
                         FireFighterClass.configs.saveToFile();
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§a", "fireset_delete"));
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§a", "fireset_delete"));
                     } else
                     {
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "fireset_mission_not_found"));
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "fireset_mission_not_found"));
                     }
                     break;
 
 
                 case "editmission": ///EDIT MISSION///
+                    if (!(Sender instanceof Player))
+                    {
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("", "only_players_command"));
+                        return true;
+                    }
                     if (args.length < 3)
                     {
-                        p.sendMessage(getUsage());
+                        Sender.sendMessage(getUsage());
                         break;
                     }
                     if (!existsMission(args[1]))
                     {
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "fireset_mission_not_found"));
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "fireset_mission_not_found"));
                         break;
                     }
                     switch (args[2])
@@ -174,7 +320,7 @@ public class Fireset implements CommandExecutor
                         case "name":  //editing mission's name
                             if (args.length < 4)
                             {
-                                p.sendMessage(getUsage());
+                                Sender.sendMessage(getUsage());
                                 break command_switch;
                             }
                             String newName = args[3];
@@ -189,7 +335,7 @@ public class Fireset implements CommandExecutor
                         case "description":  //editing mission's description
                             if (args.length < 4)
                             {
-                                p.sendMessage(getUsage());
+                                Sender.sendMessage(getUsage());
                                 break command_switch;
                             }
 
@@ -203,35 +349,36 @@ public class Fireset implements CommandExecutor
 
                             break;
                         case "rewards":  //editing mission's rewards
-                            if (!p.hasPermission(Permissions.SET_REWARDS.getNode()))
+                            if (!Sender.hasPermission(Permissions.SET_REWARDS.getNode()))
                             { //invalid permissions
-                                p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
+                                Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
                                 return true;
                             }
-                            openRewardsGUI(args[1], p);
+                            Player player = (Player) Sender;
+                            openRewardsGUI(args[1], player);
 
                             break;
                         default:
-                            p.sendMessage(getUsage());
+                            Sender.sendMessage(getUsage());
                             break command_switch;
                     }
                     break;
 
 
                 case "addmission": ///ADD MISSION///
+                    if (!(Sender instanceof Player))
+                    {
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("", "only_players_command"));
+                        return true;
+                    }
                     if (args.length < 2)
                     {
-                        p.sendMessage(getUsage());
+                        Sender.sendMessage(getUsage());
                         break;
                     }
-                    if (FireFighterClass.fireset_first_position.containsKey(p.getUniqueId()) && FireFighterClass.fireset_second_position.containsKey(p.getUniqueId()))
-                    { //checks if the area is set
-                        FireFighterClass.configs.set("missions." + args[1] + ".first_position.x", FireFighterClass.fireset_first_position.get(p.getUniqueId()).getBlockX());
-                        FireFighterClass.configs.set("missions." + args[1] + ".first_position.z", FireFighterClass.fireset_first_position.get(p.getUniqueId()).getBlockZ());
-                        FireFighterClass.configs.set("missions." + args[1] + ".second_position.x", FireFighterClass.fireset_second_position.get(p.getUniqueId()).getBlockX());
-                        FireFighterClass.configs.set("missions." + args[1] + ".second_position.z", FireFighterClass.fireset_second_position.get(p.getUniqueId()).getBlockZ());
-                        FireFighterClass.configs.set("missions." + args[1] + ".altitude", Math.min((FireFighterClass.fireset_first_position.get(p.getUniqueId()).getBlockY()), (FireFighterClass.fireset_second_position.get(p.getUniqueId()).getBlockY())));
-                        FireFighterClass.configs.set("missions." + args[1] + ".world", FireFighterClass.fireset_first_position.get(p.getUniqueId()).getWorld().getName());
+                    Player p = (Player) Sender;
+                    if(getPlayerRegion(p) == null) return true;
+                        FireFighterClass.configs.set("missions." + args[1] + ".region", getPlayerRegion(p).getId());
                         if (args.length >= 3)
                         {
                             StringBuilder description = new StringBuilder();
@@ -244,38 +391,60 @@ public class Fireset implements CommandExecutor
                         {
                             FireFighterClass.configs.set("missions." + args[1] + ".description", ChatColor.RED + "Fire at: " + args[1]);
                         }
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§a", "fireset_added_mission"));
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§a", "fireset_added_mission"));
                         FireFighterClass.configs.saveToFile();
-                    } else
-                    {
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "fireset_invalid_selection"));
-                        break;
-                    }
+
                     break;
                 case "setwand":
+                    if (!(Sender instanceof Player))
+                    {
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("", "only_players_command"));
+                        return true;
+                    }
                     if (args.length != 1)
                     {
-                        p.sendMessage(getUsage());
+                        Sender.sendMessage(getUsage());
                         break;
                     }
-                    ItemStack newWand = p.getInventory().getItemInMainHand();
+                    Player player = (Player) Sender;
+                    ItemStack newWand = player.getInventory().getItemInMainHand();
                     if (newWand.getType() != Material.AIR)
                     { //checks if the player has something in his hand
                         newWand.setAmount(1);
                         FireFighterClass.configs.set("fireset.wand", newWand);
                         FireFighterClass.configs.saveToFile();
-                        p.sendMessage(FireFighterClass.messages.formattedMessage("§a", "fireset_wand_set"));
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§a", "fireset_wand_set"));
                     }
                     break;
-
+                case "endmission":
+                    if (!Sender.hasPermission(Permissions.START_MISSION.getNode()))
+                    {
+                        Sender.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
+                    }
+                    if(args.length == 1){
+                        Sender.sendMessage("§cSpecifica il tipo di missione");
+                        break;
+                    }
+                    String mission = args[1];
+                    endMission(Sender, mission);
+                    break;
 
                 default:
-                    p.sendMessage(getUsage());
+                    Sender.sendMessage(getUsage());
                     break;
             }
         }
         return true;
     }
+    private void endMission(CommandSender sender, String missionId) {
+        if (activeMissionId == null || !activeMissionId.equals(missionId)) {
+            sender.sendMessage("§cNo active mission " + missionId + " to end.");
+            return;
+        }
+        sender.sendMessage("§eForce stopping mission " + missionId + "...");
+        stopMission();
+    }
+
 
     private boolean existsMission(String name)
     {
@@ -342,6 +511,39 @@ public class Fireset implements CommandExecutor
         //opening GUI
         inventoryOwner.openInventory(GUI);
     }
+
+    private void sendHotbar(Player p, String msg) {
+        TitleActionBarUtil.sendActionBarMessage(p, msg);
+    }
+
+    private void giveRewards(String missionId, World world) {
+        // implement reward logic from original giveRewards()
+    }
+    private void stopMission() {
+        if (missionTask != null) {
+            missionTask.cancel();
+            missionTask = null;
+        }
+        if (activeMissionId != null) {
+            // Cleanup fires
+            Set<BlockVector3> positions = firePositions.remove(activeMissionId);
+            if (positions != null) {
+                for (BlockVector3 vec : positions) {
+                    World world = Bukkit.getWorlds().get(0);
+                    Block b = world.getBlockAt(vec.getBlockX(), vec.getBlockY(), vec.getBlockZ());
+                    if (b.getType() == Material.FIRE) {
+                        b.setType(Material.AIR);
+                    }
+                }
+            }
+            // Remove bossbar
+            BossBar bar = bossBars.remove(activeMissionId);
+            if (bar != null) bar.removeAll();
+            initialCount.remove(activeMissionId);
+            activeMissionId = null;
+        }
+    }
+
 
 }
 

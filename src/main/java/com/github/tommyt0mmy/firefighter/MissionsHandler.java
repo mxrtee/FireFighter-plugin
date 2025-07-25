@@ -1,23 +1,146 @@
 package com.github.tommyt0mmy.firefighter;
 
+import com.github.tommyt0mmy.firefighter.utility.Configs;
 import com.github.tommyt0mmy.firefighter.utility.Permissions;
 import com.github.tommyt0mmy.firefighter.utility.TitleActionBarUtil;
 import com.github.tommyt0mmy.firefighter.utility.XMaterial;
+import com.sk89q.worldedit.bukkit.BukkitAdapter;
+import com.sk89q.worldedit.math.BlockVector3;
+import com.sk89q.worldguard.WorldGuard;
+import com.sk89q.worldguard.protection.managers.RegionManager;
+import com.sk89q.worldguard.protection.regions.ProtectedRegion;
+import com.sk89q.worldguard.protection.regions.RegionContainer;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.configuration.MemorySection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Random;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class MissionsHandler extends BukkitRunnable
 {
+    private final JavaPlugin plugin;
+    private final FileConfiguration config;
+    private final RegionContainer container;
+
+    private final FireFighter fireFighter = FireFighter.getInstance();
+    private boolean firstRun = true;
+
+    // Track initial and current fires per mission
+    private final Map<String, Integer> initialFires = new ConcurrentHashMap<>();
+    private final Map<String, Set<Block>> currentFires = new ConcurrentHashMap<>();
+
+    public MissionsHandler(JavaPlugin plugin) {
+        this.plugin = plugin;
+        this.config = plugin.getConfig();
+        this.container = WorldGuard.getInstance().getPlatform().getRegionContainer();
+    }
+
+    @Override
+    public void run() {
+        if (firstRun) { firstRun = false; return; }
+        if (!config.contains("missions") || fireFighter.startedMission == false) return;
+
+        World world = Bukkit.getWorld(fireFighter.configs.getConfig().getString("missions." + fireFighter.missionName + ".world"));
+        if (world == null) return;
+        RegionManager mgr = container.get(BukkitAdapter.adapt(world));
+        ProtectedRegion region = mgr.getRegion(fireFighter.missionName);
+        if (region == null) return;
+
+        // Spawn fires and collect current fire blocks
+        Set<Block> fires = new HashSet<>();
+        BlockVector3 min = region.getMinimumPoint(), max = region.getMaximumPoint();
+        for (int x = min.getBlockX(); x <= max.getBlockX(); x++) {
+            for (int y = min.getBlockY(); y < max.getBlockY(); y++) {
+                for (int z = min.getBlockZ(); z <= max.getBlockZ(); z++) {
+                    Block below = world.getBlockAt(x, y, z);
+                    Block above = world.getBlockAt(x, y + 1, z);
+                    if (below.getType().isSolid() && above.getType() == Material.AIR) {
+                        above.setType(Material.FIRE);
+                        fires.add(above);
+                    }
+                }
+            }
+        }
+
+        // Initialize counts
+        if (!initialFires.containsKey(fireFighter.missionName)) {
+            initialFires.put(fireFighter.missionName, fires.size());
+        }
+        currentFires.put(fireFighter.missionName, fires);
+        int initial = initialFires.get(fireFighter.missionName);
+        int remaining = fires.size();
+        int extinguished = initial - remaining;
+
+        // Build progress bar
+        int totalSlots = 20;
+        int filledSlots = (int) ((double) extinguished / initial * totalSlots);
+        StringBuilder bar = new StringBuilder();
+        for (int i = 0; i < filledSlots; i++) bar.append('█');
+        for (int i = filledSlots; i < totalSlots; i++) bar.append('░');
+        String hotbar = "§a" + bar + " §7(" + extinguished + "/" + initial + ")";
+
+        // Broadcast to players in region
+        for (Player p : world.getPlayers()) {
+            BlockVector3 pos = BlockVector3.at(p.getLocation().getBlockX(), p.getLocation().getBlockY(), p.getLocation().getBlockZ());
+            if (region.contains(pos)) {
+                Broadcast(world, "", "", hotbar, "firefighter.use");
+            }
+        }
+
+        // Check for mission end
+        if (remaining == 0) {
+            turnOffInstructions();
+        }
+    }
+
+    // Existing methods from your code:
+    private void Broadcast(World w, String title, String subtitle, String hotbar, String permission) {
+        if (w == null) return;
+        for (Player dest : w.getPlayers()) {
+            if (!dest.hasPermission(permission)) continue;
+            if (!title.isEmpty()) TitleActionBarUtil.sendTitle(dest, title, 10, 100, 20);
+            if (!subtitle.isEmpty()) TitleActionBarUtil.sendSubTitle(dest, subtitle, 10, 100, 20);
+            new BukkitRunnable() {
+                int timer = 0;
+                public void run() {
+                    TitleActionBarUtil.sendActionBarMessage(dest, hotbar);
+                    if (++timer >= 4) cancel();
+                }
+            }.runTaskTimer(fireFighter, 0, 20);
+        }
+    }
+
+    private void turnOffInstructions() {
+        fireFighter.console.info("Mission ended");
+        giveRewards();
+        fireFighter.startedMission = false;
+        fireFighter.missionName = "";
+        initialFires.remove(fireFighter.missionName);
+        currentFires.remove(fireFighter.missionName);
+        fireFighter.PlayerContribution.clear();
+    }
+
+    private void giveRewards() {
+        // implement reward logic as before
+    }
+
+  /*  public void spawnFire(ProtectedRegion r, World world){
+        BlockVector3 min = r.getMinimumPoint(), max = r.getMaximumPoint();
+        for(int x=min.getBlockX(); x<=max.getBlockX(); x++)
+            for(int y=min.getBlockY(); y<max.getBlockY(); y++)
+                for(int z=min.getBlockZ(); z<=max.getBlockZ(); z++){
+                    Block above = world.getBlockAt(x, y+1, z);
+                    Block below = world.getBlockAt(x, y, z);
+                    if(above.getType()==Material.AIR && below.getType().isSolid())
+                        above.setType(Material.FIRE);
+                }
+    }
 
     private FireFighter FireFighterClass = FireFighter.getInstance();
 
@@ -79,95 +202,8 @@ public class MissionsHandler extends BukkitRunnable
         }
         String missionPath = "missions." + missionName;
         FireFighterClass.PlayerContribution.clear();
-        //broadcast message
-        if (config.get(missionPath + ".world").toString() == null)
-        { //avoids NPE
-            turnOffInstructions();
-            cancel();
-        }
-        World world = FireFighterClass.getServer().getWorld((config.get(missionPath + ".world").toString()));
-        if (world == null)
-        { //avoids NPE
-            return;
-        }
+        spawnFire(WorldGuard.getInstance().getPlatform().getRegionContainer().get(BukkitAdapter.adapt(Bukkit.getWorld("Napoli"))).getRegion(FireFighter.getInstance().configs.getConfig().getString(missionPath + "." + "region")), Bukkit.getWorld("Napoli"));
 
-        String title = ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("startedmission_title")
-                .replaceAll("<mission_description>", config.get(missionPath + ".description").toString())
-                .replaceAll("<coordinates>", getMediumCoord(missionName)));
-        String subtitle = ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("startedmission_subtitle")
-                .replaceAll("<mission_description>", config.get(missionPath + ".description").toString())
-                .replaceAll("<coordinates>", getMediumCoord(missionName)));
-        String hotbar = ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("startedmission_hotbar")
-                .replaceAll("<mission_description>", config.get(missionPath + ".description").toString())
-                .replaceAll("<coordinates>", getMediumCoord(missionName)));
-        String chat = ChatColor.translateAlternateColorCodes('&', FireFighterClass.messages.getMessage("startedmission_chat")
-                .replaceAll("<mission_description>", config.get(missionPath + ".description").toString())
-                .replaceAll("<coordinates>", getMediumCoord(missionName)));
-
-        Broadcast(world, title, subtitle, hotbar, Permissions.ON_DUTY.getNode());
-        Broadcast(world, chat, Permissions.ON_DUTY.getNode());
-
-        FireFighterClass.console.info("[" + world.getName() + "] Started '" + missionName + "' mission");
-        //starting fire
-        int y = Integer.parseInt(config.get(missionPath + ".altitude").toString());
-        int x1 = Integer.parseInt(config.get(missionPath + ".first_position.x").toString());
-        int z1 = Integer.parseInt(config.get(missionPath + ".first_position.z").toString());
-        int x2 = Integer.parseInt(config.get(missionPath + ".second_position.x").toString());
-        int z2 = Integer.parseInt(config.get(missionPath + ".second_position.z").toString());
-        for (int x = Math.min(x1, x2); x <= Math.max(x1, x2); x++)
-        {
-            for (int z = Math.min(z1, z2); z <= Math.max(z1, z2); z++)
-            {
-                Location currLocation = new Location(world, x, y, z);
-                while (!currLocation.getBlock().getType().equals(Material.AIR))
-                {
-                    currLocation.add(0, 1, 0);
-                }
-                if (random.nextInt(2) == 1)
-                { //randomizing the spawning of the fire
-                    continue;
-                }
-                currLocation.subtract(0, 1, 0);
-                if (currLocation.getBlock().getType().equals(Material.AIR))
-                {
-                    continue;
-                }
-                currLocation.add(0, 1, 0);
-                Block currBlock = currLocation.getBlock();
-                currBlock.setType(XMaterial.FIRE.parseMaterial());
-                setOnFire.add(currBlock);
-            }
-        }
-
-        //keeping the fire on
-        new BukkitRunnable()
-        {
-            int timer = 0;
-
-            public void run()
-            {
-                timer++;
-                if (timer >= fire_lasting_ticks / 100)
-                {
-                    cancel();
-                }
-                for (int i = 0; i < setOnFire.size(); i++)
-                {
-                    Block currBlock = setOnFire.get(i);
-                    if (currBlock.getType().equals(XMaterial.FIRE.parseMaterial()) && !currBlock.getType().equals(Material.AIR))
-                    {
-                        continue;
-                    }
-                    if (random.nextInt(2) == 1)
-                    { //randomizing the respawn of the fire
-                        setOnFire.remove(i);
-                        continue;
-                    }
-                    currBlock.setType(XMaterial.FIRE.parseMaterial());
-                }
-            }
-
-        }.runTaskTimer(FireFighterClass, 0, 100);
 
         //TURNING OFF THE MISSION
 
@@ -304,5 +340,5 @@ public class MissionsHandler extends BukkitRunnable
         FireFighterClass.missionName = "";
         setOnFire.clear();
         FireFighterClass.PlayerContribution.clear();
-    }
+    }*/
 }

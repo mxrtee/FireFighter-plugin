@@ -77,6 +77,9 @@ public class FiresetTabCompleter implements TabCompleter
             {
                 suggestions.add("startmission");
             }
+            if(startsWith(args[0], "endmission")){
+                suggestions.add("endmission");
+            }
         }
         if (args.length == 2)
         {
@@ -109,6 +112,20 @@ public class FiresetTabCompleter implements TabCompleter
                 }
             }
             if (args[0].equals("startmission"))
+            {
+                if (!(((MemorySection) FireFighterClass.configs.getConfig().get("missions")).getKeys(false).isEmpty()))
+                {
+                    for (String missionName : ((MemorySection) FireFighterClass.configs.getConfig().get("missions")).getKeys(false))
+                    {
+                        if (startsWith(args[1], missionName))
+                        {
+                            suggestions.add(missionName);
+                        }
+                    }
+                }
+            }
+
+            if (args[0].equals("endmission"))
             {
                 if (!(((MemorySection) FireFighterClass.configs.getConfig().get("missions")).getKeys(false).isEmpty()))
                 {

@@ -37,10 +37,10 @@ public class Firetool implements CommandExecutor
             return true;
         }
 
-        // creating the fire extinguisher's ItemStack object //
-
         Inventory inventory = p.getInventory();
         inventory.addItem(FireFighterClass.getFireExtinguisher());
+        inventory.addItem(FireFighterClass.getFireBoots());
+        inventory.addItem(FireFighterClass.getFireMask());
         TitleActionBarUtil.sendActionBarMessage(p, ChatColor.YELLOW + "" + ChatColor.UNDERLINE + FireFighterClass.messages.formattedMessage("", "hold_right_click"));
 
         return true;

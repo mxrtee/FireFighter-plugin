@@ -40,10 +40,8 @@ public class FireExtinguisherActivation implements Listener
             {
                 return;
             }
-            if (!(action == Action.RIGHT_CLICK_AIR || action == Action.RIGHT_CLICK_BLOCK))
-            { //only right clicks
-                return;
-            }
+            if (!(action == Action.RIGHT_CLICK_AIR || action == Action.RIGHT_CLICK_BLOCK)) return;
+
             if (!p.hasPermission(Permissions.USE_EXTINGUISHER.getNode()))
             {
                 p.sendMessage(FireFighterClass.messages.formattedMessage("§c", "invalid_permissions"));
@@ -64,68 +62,48 @@ public class FireExtinguisherActivation implements Listener
             }
 
             //particle effects and turning off fire
-            new BukkitRunnable()
-            {
+            new BukkitRunnable() {
                 Location loc = p.getLocation();
                 Vector direction = loc.getDirection().normalize();
                 double timer = 0;
 
-                public void run()
-                {
-                    timer += 1;
-                    boolean playExtinguishingSound = false; //to play the sound only one time every tick
+                @Override
+                public void run() {
+                    timer++;
+                    boolean playExtinguishingSound = false;
+
+                    // Calcolo il punto di emissione lungo la direzione di tiro
                     double x = direction.getX() * timer;
                     double y = direction.getY() * timer + 1.4;
                     double z = direction.getZ() * timer;
                     loc.add(x, y, z);
-                    showParticle(loc, Particle.CLOUD, (int) (timer * 3.0), (int) (timer / 4));
-                    //extinguishing the fire that is in the action range of the fire extinguisher at the "timer" tick
-                    // ! the further the smoke from the extinguisher goes, the more its radius increases ! //
-                    for (int j = 0; j < 4; j++)
-                    { //it repeats 4 times,each loop for positive x, negative x, positive z, negative z
-                        Location loc2 = null;
-                        for (int i = 0; i < ((int) (timer / 4) + 1); i++)
-                        { //  (timer/4) is the action range for each facing direction (at the "timer" tick) so the code is repeating for each block inside the range
-                            switch (j)
-                            {
-                                case 0:
-                                    loc2 = new Location(loc.getWorld(), loc.getX() + i, loc.getY(), loc.getZ());
-                                    break;
-                                case 1:
-                                    loc2 = new Location(loc.getWorld(), loc.getX() - i, loc.getY(), loc.getZ());
-                                    break;
-                                case 2:
-                                    loc2 = new Location(loc.getWorld(), loc.getX(), loc.getY(), loc.getZ() + i);
-                                    break;
-                                case 3:
-                                    loc2 = new Location(loc.getWorld(), loc.getX(), loc.getY(), loc.getZ() - i);
-                                    break;
-                            }
-                            Block currBlock2 = loc2.getBlock(); //if the block inside the range is fire
-                            if (currBlock2.getType() == XMaterial.FIRE.parseMaterial())
-                            {
-                                currBlock2.setType(Material.AIR);
-                                increaseContribution(p, loc2);
+
+                    // Particelle di "fumo"
+                    showParticle(loc, Particle.CLOUD, (int)(timer * 3.0), 0);
+
+                    // --- ESTINZIONE IN AREE 5x5 ---
+                    // Scorro dx e dz da -2 a +2 per coprire 5 blocchi per lato
+                    for (int dx = -3; dx <= 3; dx++) {
+                        for (int dz = -3; dz <= 3; dz++) {
+                            Location loc2 = loc.clone().add(dx, 0, dz);
+                            Block block = loc2.getBlock();
+                            if (block.getType() == XMaterial.FIRE.parseMaterial()) {
+                                block.setType(Material.AIR);
                                 playExtinguishingSound = true;
                             }
                         }
                     }
-                    //extinguishing the fire along the facing direction without offset
-                    Block currBlock = loc.getBlock();
-                    if (currBlock.getType() == XMaterial.FIRE.parseMaterial())
-                    {
-                        currBlock.setType(Material.AIR);
-                        increaseContribution(p, loc);
-                        playExtinguishingSound = true;
-                    }
-                    if (playExtinguishingSound)
-                    {
+
+                    // Suono di estinzione (una sola volta per tick)
+                    if (playExtinguishingSound) {
                         XSound.BLOCK_FIRE_EXTINGUISH.playSound(p, 1, 0);
                     }
 
+                    // Ripristino posizione di loc per il prossimo tick
                     loc.subtract(x, y, z);
-                    if (timer > 9)
-                    {
+
+                    // Durata massima del getto: 10 tick (~0.5s)
+                    if (timer > 9) {
                         this.cancel();
                     }
                 }
@@ -164,15 +142,15 @@ public class FireExtinguisherActivation implements Listener
             return false;
         }
         ItemMeta meta = item.getItemMeta();
-        if (item.getType() != XMaterial.IRON_HOE.parseMaterial())
+        if (item.getType() != Material.STICK)
         {
             return false;
         }
-        if (!meta.hasLore())
+        if (!meta.hasLore() && !meta.hasCustomModelData())
         {
             return false;
         }
-        return meta.getLore().get(0).equals(FireFighterClass.messages.getMessage("fire_extinguisher"));
+        return meta.getCustomModelData() == 78;
     }
 
     private void showParticle(Location loc, Particle particle, int count, int offsetXZ)
@@ -180,45 +158,4 @@ public class FireExtinguisherActivation implements Listener
         World w = loc.getWorld();
         w.spawnParticle(particle, loc, count, offsetXZ, 0, offsetXZ, 0);
     }
-
-    private void increaseContribution(Player p, Location fireLocation)
-    {
-        if (!FireFighterClass.startedMission || FireFighterClass.missionName.equals(""))
-        { //checks if a mission is started, if not the player will not contribute on a mission
-            return;
-        }
-        //getting the mission's location (two opposite points of the rectangular selection, missionPos1 and missionPos2)
-        String missionPath = "missions." + FireFighterClass.missionName;
-        World missionWorld = FireFighterClass.getServer().getWorld((String) FireFighterClass.getConfig().get(missionPath + ".world"));
-        int minX = Math.min(FireFighterClass.getConfig().getInt(missionPath + ".first_position.x"), FireFighterClass.getConfig().getInt(missionPath + ".second_position.x"));
-        int maxX = Math.max(FireFighterClass.getConfig().getInt(missionPath + ".first_position.x"), FireFighterClass.getConfig().getInt(missionPath + ".second_position.x"));
-        int minZ = Math.min(FireFighterClass.getConfig().getInt(missionPath + ".first_position.z"), FireFighterClass.getConfig().getInt(missionPath + ".second_position.z"));
-        int maxZ = Math.max(FireFighterClass.getConfig().getInt(missionPath + ".first_position.z"), FireFighterClass.getConfig().getInt(missionPath + ".second_position.z"));
-        int currX = fireLocation.getBlockX();
-        int currZ = fireLocation.getBlockZ();
-
-        //checking if the fire extinguished is inside the mission's area
-        if (!fireLocation.getWorld().equals(missionWorld))
-        { //if the world isn't the same
-            return;
-        }
-        if (currX > maxX || currX < minX)
-        { //x position out of range
-            return;
-        }
-        if (currZ > maxZ || currZ < minZ)
-        { //z position out of range
-            return;
-        }
-        //incrementing by one the player's contribution count or setting it to 1 if it's the first contribution
-        if (FireFighterClass.PlayerContribution.containsKey(p.getUniqueId()))
-        {
-            int tmp = FireFighterClass.PlayerContribution.get(p.getUniqueId()) + 1;
-            FireFighterClass.PlayerContribution.put(p.getUniqueId(), tmp);
-        } else
-        {
-            FireFighterClass.PlayerContribution.put(p.getUniqueId(), 1);
-        }
-    }
-
 }
